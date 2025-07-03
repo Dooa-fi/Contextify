@@ -226,26 +226,41 @@ def get_file_content_from_api(user, repo, file_path, branch='main'):
     return None
 
 def should_include_file(file_path):
-    blacklisted_files = {
+    # Files to always exclude
+    blacklisted_filenames = {
         'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'composer.lock',
-        'Pipfile.lock', 'poetry.lock', 'go.sum', 'Cargo.lock'
+        'Pipfile.lock', 'poetry.lock', 'go.sum', 'Cargo.lock',
+        '.DS_Store'
     }
+
+    # Directories to skip entirely
     skip_dirs = [
-        '.git/', 'node_modules/', '__pycache__/', 'venv/', 'env/', 
-        'dist/', 'build/', '.next/', '.nuxt/', 'vendor/', 'target/'
+        '.git/', 'node_modules/', '__pycache__/', 'venv/', 'env/',
+        'dist/', 'build/', '.next/', '.nuxt/', 'vendor/', 'target/',
+        '.idea/', '.vscode/', '.pytest_cache/', '.mypy_cache/', '.coverage/',
+        '.github/', 'coverage/', '.husky/', '.circleci/', '.cache/', 'logs/',
     ]
+
+    # Skip binary or irrelevant extensions
     skip_extensions = {
-        '.pyc', '.jpg', '.png', '.gif', '.zip', '.tar', '.gz', 
-        '.log', '.tmp', '.cache', '.map', '.min.js', '.min.css'
+        '.exe', '.dll', '.bin', '.pyc', '.o', '.so',
+        '.zip', '.tar', '.gz', '.rar', '.7z',
+        '.jpg', '.jpeg', '.png', '.gif', '.ico',
+        '.log', '.tmp', '.swp', '.db', '.lock', '.pdf',
+        '.min.js', '.min.css', '.map'
     }
-    
-    filename = file_path.split('/')[-1]
-    if filename in blacklisted_files:
+
+    # Normalize path
+    file_path_lower = file_path.lower()
+    filename = file_path.split('/')[-1].lower()
+
+    if filename in blacklisted_filenames:
         return False
-    if any(skip_dir in file_path for skip_dir in skip_dirs):
+    if any(skip_dir in file_path_lower for skip_dir in skip_dirs):
         return False
-    if any(file_path.lower().endswith(ext) for ext in skip_extensions):
+    if any(file_path_lower.endswith(ext) for ext in skip_extensions):
         return False
+
     return True
 
 def get_clean_repo_context(user, repo):
@@ -308,7 +323,7 @@ def get_clean_repo_context(user, repo):
             content = get_file_content_from_api(user, repo, file_path, branch)
             if content:
                 context_sections.append(f"\n--- {file_path} ---")
-                context_sections.append(content[:5000])
+                context_sections.append(content[:7000])
                 if len(content) > 5000:
                     context_sections.append("\n... (truncated)")
                 context_sections.append("")
@@ -321,7 +336,7 @@ def get_clean_repo_context(user, repo):
             content = get_file_content_from_api(user, repo, file_path, branch)
             if content:
                 context_sections.append(f"\n--- {file_path} ---")
-                context_sections.append(content[:2000])
+                context_sections.append(content[:3000])
                 if len(content) > 2000:
                     context_sections.append("\n... (truncated)")
                 context_sections.append("")
@@ -341,12 +356,12 @@ def get_clean_repo_context(user, repo):
                 context_sections.append(f"\n### {ext.upper()} FILES")
                 context_sections.append("-" * 30)
                 
-                for file_path in files[:8]:  # Max 8 files per type
+                for file_path in files[:20]:  # Max 8 files per type
                     content = get_file_content_from_api(user, repo, file_path, branch)
                     if content:
                         context_sections.append(f"\n--- {file_path} ---")
                         if len(content) > 3000:
-                            context_sections.append(content[:3000] + "\n... (truncated)")
+                            context_sections.append(content[:7000] + "\n... (truncated)")
                         else:
                             context_sections.append(content)
                         context_sections.append("")
