@@ -4,7 +4,7 @@ import io
 import base64
 from datetime import datetime
 import requests
-from flask import Flask, render_template_string, request, Response, session
+from flask import Flask, render_template_string, request, Response
 from markupsafe import Markup
 
 app = Flask(__name__)
@@ -177,16 +177,11 @@ HTML_TEMPLATE = '''
         
         {% if context_text %}
             <textarea readonly>{{ context_text }}</textarea>
-            {% if success %}
-                {% for i in range(session['chunks']|length) %}
-                <form method="POST" action="/download">
-                    <input type="hidden" name="chunk_index" value="{{ i }}">
-                    <input type="hidden" name="filename" value="{{ filename }}">
-                    <button type="submit" class="download-btn">📥 Download File {{ i + 1 }}</button>
-                </form>
-                {% endfor %}
-            {% endif %}
-
+            <form method="POST" action="/download">
+                <input type="hidden" name="context_data" value="{{ context_text }}">
+                <input type="hidden" name="filename" value="{{ filename }}">
+                <button type="submit" class="download-btn">📥 Download Context File</button>
+            </form>
         {% endif %}
         
         <div class="loading" id="loading">
@@ -272,113 +267,110 @@ def get_clean_repo_context(user, repo):
     repo_info = get_repo_info(user, repo)
     if not repo_info:
         return None, "Repository not found or private"
-
+    
     branch = repo_info.get('default_branch', 'main')
     repo_name = repo_info.get('name', repo)
     description = repo_info.get('description', 'No description available')
     language = repo_info.get('language', 'Unknown')
-
+    
     api_url = f"https://api.github.com/repos/{user}/{repo}/git/trees/{branch}?recursive=1"
     response = requests.get(api_url)
     if response.status_code != 200:
         return None, "Could not fetch repository structure"
-
+    
     tree = response.json().get('tree', [])
-
+    
     readme_files = []
     important_config_files = []
     source_files = []
-    image_files = []
-    all_files = []
-
+    
     useful_configs = {
         'package.json', 'tsconfig.json', 'vite.config.js', 'vite.config.ts',
         'tailwind.config.js', 'requirements.txt', 'pyproject.toml', 
         'Cargo.toml', 'go.mod', 'Makefile', 'Dockerfile'
     }
-
+    
     for item in tree:
-        if item['type'] == 'blob':
-            path = item['path']
-            all_files.append(path)
-            filename = path.split('/')[-1].lower()
-
-            if not should_include_file(path):
-                if any(path.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp']):
-                    image_files.append(path)
-                continue
-
+        if item['type'] == 'blob' and should_include_file(item['path']):
+            file_path = item['path']
+            filename = file_path.split('/')[-1].lower()
+            
             if any(doc in filename for doc in ['readme', 'changelog', 'license']):
-                readme_files.append(path)
-            elif filename in useful_configs:
-                important_config_files.append(path)
+                readme_files.append(file_path)
+            elif file_path.split('/')[-1] in useful_configs:
+                important_config_files.append(file_path)
             elif any(filename.endswith(ext) for ext in [
                 '.py', '.js', '.ts', '.jsx', '.tsx', '.vue', '.html', '.css', 
                 '.java', '.cpp', '.c', '.go', '.rs', '.php', '.rb'
             ]):
-                source_files.append(path)
-
-    # Start assembling context content
-    context_parts = []
-    context_parts.append("=" * 80)
-    context_parts.append(f"🚀 CLEAN PROJECT CONTEXT: {repo_name}")
-    context_parts.append("=" * 80)
-    context_parts.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    context_parts.append(f"Repository: https://github.com/{user}/{repo}")
-    context_parts.append(f"Language: {language}")
-    context_parts.append(f"Description: {description}\n")
-
-    context_parts.append("📁 FULL FILE STRUCTURE:")
-    context_parts += [f" - {f}" for f in all_files]
-
-    if image_files:
-        context_parts.append("\n🖼️ IMAGE FILES (Not Included, Just Listed):")
-        context_parts += [f" - {f}" for f in image_files]
-
-    # Add README
+                source_files.append(file_path)
+    
+    context_sections = []
+    context_sections.append("=" * 80)
+    context_sections.append(f"🚀 CLEAN PROJECT CONTEXT: {repo_name}")
+    context_sections.append("=" * 80)
+    context_sections.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    context_sections.append(f"Repository: https://github.com/{user}/{repo}")
+    context_sections.append(f"Language: {language}")
+    context_sections.append(f"Description: {description}")
+    context_sections.append("")
+    
+    # README & DOCUMENTATION
     if readme_files:
-        context_parts.append("\n## 📚 PROJECT DOCUMENTATION")
-        for file in readme_files[:3]:
-            content = get_file_content_from_api(user, repo, file, branch)
+        context_sections.append("## 📚 PROJECT DOCUMENTATION")
+        context_sections.append("=" * 50)
+        for file_path in readme_files[:3]:  # Limit to 3 files
+            content = get_file_content_from_api(user, repo, file_path, branch)
             if content:
-                context_parts.append(f"\n--- {file} ---\n{content.strip()}")
-
-    # Config
+                context_sections.append(f"\n--- {file_path} ---")
+                context_sections.append(content[:10000])
+                if len(content) > 5000:
+                    context_sections.append("\n... (truncated)")
+                context_sections.append("")
+    
+    # CONFIGURATION
     if important_config_files:
-        context_parts.append("\n## ⚙️ CONFIGURATION FILES")
-        for file in important_config_files:
-            content = get_file_content_from_api(user, repo, file, branch)
+        context_sections.append("## ⚙️ PROJECT CONFIGURATION")
+        context_sections.append("=" * 50)
+        for file_path in important_config_files[:5]:  # Limit to 5 files
+            content = get_file_content_from_api(user, repo, file_path, branch)
             if content:
-                context_parts.append(f"\n--- {file} ---\n{content.strip()}")
-
-    # Source
+                context_sections.append(f"\n--- {file_path} ---")
+                context_sections.append(content[:5000])
+                if len(content) > 2000:
+                    context_sections.append("\n... (truncated)")
+                context_sections.append("")
+    
+    # SOURCE CODE
     if source_files:
-        context_parts.append("\n## 💻 SOURCE CODE")
-        for file in source_files:
-            content = get_file_content_from_api(user, repo, file, branch)
-            if content:
-                context_parts.append(f"\n--- {file} ---\n{content.strip()}")
-
-    # Attribution
-    context_parts.append("\n—" * 40)
-    context_parts.append("Generated using Contextify by @Dooafi → https://github.com/Dooa-fi")
-
-    # Final join
-    full_context = '\n'.join(context_parts)
-    max_chunk_size = 5 * 1024 * 1024  # 5 MB
-    chunks = []
-
-    current = ""
-    for line in full_context.splitlines(keepends=True):
-        if len(current.encode('utf-8')) + len(line.encode('utf-8')) > max_chunk_size:
-            chunks.append(current)
-            current = ""
-        current += line
-    if current:
-        chunks.append(current)
-
-    return chunks, None
-
+        context_sections.append("## 💻 SOURCE CODE")
+        context_sections.append("=" * 50)
+        
+        files_by_type = {}
+        for file_path in source_files:
+            ext = '.' + file_path.split('.')[-1] if '.' in file_path else 'no_ext'
+            files_by_type.setdefault(ext, []).append(file_path)
+        
+        for ext, files in sorted(files_by_type.items()):
+            if files:
+                context_sections.append(f"\n### {ext.upper()} FILES")
+                context_sections.append("-" * 30)
+                
+                for file_path in files[:20]:  # Max 8 files per type
+                    content = get_file_content_from_api(user, repo, file_path, branch)
+                    if content:
+                        context_sections.append(f"\n--- {file_path} ---")
+                        if len(content) > 3000:
+                            context_sections.append(content[:50000] + "\n... (truncated)")
+                        else:
+                            context_sections.append(content)
+                        context_sections.append("")
+    
+    context_sections.append("=" * 80)
+    context_sections.append("🎯 END OF CLEAN CONTEXT")
+    context_sections.append("=" * 80)
+    
+    return '\n'.join(context_sections), None
 
 @app.route('/', methods=['GET', 'POST'])
 def home():
@@ -388,49 +380,43 @@ def home():
         user, repo = validate_github_url(github_link)
         if not user or not repo:
             return render_template_string(HTML_TEMPLATE, 
-                                          error='Please enter a valid GitHub repository URL',
-                                          github_link=github_link)
+                                        error='Please enter a valid GitHub repository URL',
+                                        github_link=github_link)
         
         try:
-            chunks, error = get_clean_repo_context(user, repo)
-
+            context_text, error = get_clean_repo_context(user, repo)
+            
             if error:
                 return render_template_string(HTML_TEMPLATE, 
-                                              error=f'Error: {error}',
-                                              github_link=github_link)
-
-            # Save chunks in session
-            session['chunks'] = chunks
-            session['base_filename'] = repo
-
+                                            error=f'Error: {error}',
+                                            github_link=github_link)
+            
+            filename = f'{repo}_clean_context.txt'
             return render_template_string(HTML_TEMPLATE,
-                                          success='Context generated successfully!',
-                                          context_text='Context has been chunked and saved.',
-                                          filename=repo,
-                                          github_link=github_link)
-
+                                        success='Context generated successfully!',
+                                        context_text=context_text,
+                                        filename=filename,
+                                        github_link=github_link)
+            
         except Exception as e:
             return render_template_string(HTML_TEMPLATE,
-                                          error=f'Error generating context: {str(e)}',
-                                          github_link=github_link)
-
+                                        error=f'Error generating context: {str(e)}',
+                                        github_link=github_link)
+    
     return render_template_string(HTML_TEMPLATE)
 
 @app.route('/download', methods=['POST'])
 def download_file():
-    index = int(request.form.get('chunk_index', 0))
-    filename = request.form.get('filename', 'context')
-    from flask import session
-    chunks = session.get('chunks', [])
-    base = session.get('base_filename', filename)
-
-    if index >= len(chunks):
-        return "Invalid chunk", 400
-
+    context_data = request.form.get('context_data', '')
+    filename = request.form.get('filename', 'context.txt')
+    
+    if not context_data:
+        return render_template_string(HTML_TEMPLATE, error='No context data found')
+    
     return Response(
-        chunks[index],
+        context_data,
         mimetype='text/plain',
-        headers={'Content-Disposition': f'attachment; filename={base}_{index+1}.txt'}
+        headers={'Content-Disposition': f'attachment; filename={filename}'}
     )
 
 # Vercel entry point
