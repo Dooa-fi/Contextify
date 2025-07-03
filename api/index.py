@@ -6,15 +6,8 @@ from datetime import datetime
 import requests
 from flask import Flask, render_template_string, request, Response, session
 from markupsafe import Markup
-from flask_session import Session
-
 
 app = Flask(__name__)
-app.config['SESSION_TYPE'] = 'filesystem'
-app.config['SESSION_FILE_DIR'] = './.flask_session/'  # Optional, default
-app.config['SESSION_PERMANENT'] = False
-Session(app)
-
 app.secret_key = 'your-secret-key-here'
 
 GITHUB_REPO_REGEX = re.compile(r'^https://github\.com/([\w\-]+)/([\w\-]+)(/?|\.git)?$')
