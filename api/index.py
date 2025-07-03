@@ -1,17 +1,16 @@
 import os
 import re
-import io
 import base64
 from datetime import datetime
 import requests
 from flask import Flask, render_template_string, request, Response
-from markupsafe import Markup
 
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-here'
 
 GITHUB_REPO_REGEX = re.compile(r'^https://github\.com/([\w\-]+)/([\w\-]+)(/?|\.git)?$')
 
+# Your HTML template (same as before)
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -199,6 +198,7 @@ HTML_TEMPLATE = '''
 </html>
 '''
 
+# All your functions (validate_github_url, get_repo_info, etc.) - same as before
 def validate_github_url(url):
     match = GITHUB_REPO_REGEX.match(url)
     if not match:
@@ -300,33 +300,33 @@ def get_clean_repo_context(user, repo):
     context_sections.append(f"Description: {description}")
     context_sections.append("")
     
-    # README & DOCUMENTATION
+    # README & DOCUMENTATION (limited for performance)
     if readme_files:
         context_sections.append("## 📚 PROJECT DOCUMENTATION")
         context_sections.append("=" * 50)
-        for file_path in readme_files[:3]:  # Limit to 3 files
+        for file_path in readme_files[:2]:  # Limit to 2 files
             content = get_file_content_from_api(user, repo, file_path, branch)
             if content:
                 context_sections.append(f"\n--- {file_path} ---")
-                context_sections.append(content[:5000])
-                if len(content) > 5000:
+                context_sections.append(content[:3000])  # Smaller limit
+                if len(content) > 3000:
                     context_sections.append("\n... (truncated)")
                 context_sections.append("")
     
-    # CONFIGURATION
+    # CONFIGURATION (limited)
     if important_config_files:
         context_sections.append("## ⚙️ PROJECT CONFIGURATION")
         context_sections.append("=" * 50)
-        for file_path in important_config_files[:5]:  # Limit to 5 files
+        for file_path in important_config_files[:3]:  # Limit to 3 files
             content = get_file_content_from_api(user, repo, file_path, branch)
             if content:
                 context_sections.append(f"\n--- {file_path} ---")
-                context_sections.append(content[:2000])
-                if len(content) > 2000:
+                context_sections.append(content[:1500])  # Smaller limit
+                if len(content) > 1500:
                     context_sections.append("\n... (truncated)")
                 context_sections.append("")
     
-    # SOURCE CODE
+    # SOURCE CODE (very limited for performance)
     if source_files:
         context_sections.append("## 💻 SOURCE CODE")
         context_sections.append("=" * 50)
@@ -341,12 +341,13 @@ def get_clean_repo_context(user, repo):
                 context_sections.append(f"\n### {ext.upper()} FILES")
                 context_sections.append("-" * 30)
                 
-                for file_path in files[:8]:  # Max 8 files per type
+                # Very limited for Vercel
+                for file_path in files[:3]:  # Max 3 files per type
                     content = get_file_content_from_api(user, repo, file_path, branch)
                     if content:
                         context_sections.append(f"\n--- {file_path} ---")
-                        if len(content) > 3000:
-                            context_sections.append(content[:3000] + "\n... (truncated)")
+                        if len(content) > 2000:
+                            context_sections.append(content[:2000] + "\n... (truncated)")
                         else:
                             context_sections.append(content)
                         context_sections.append("")
@@ -405,5 +406,5 @@ def download_file():
     )
 
 # Vercel entry point
-if __name__ == '__main__':
-    app.run(debug=True)
+def handler(request):
+    return app(request.environ, lambda status, headers: None)
