@@ -1,10 +1,11 @@
 import os
 import re
-import requests
-from datetime import datetime
-from flask import Flask, render_template_string, request, send_file, flash, redirect, url_for
-from markupsafe import Markup
+import io
 import base64
+from datetime import datetime
+import requests
+from flask import Flask, render_template_string, request, Response
+from markupsafe import Markup
 
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-here'
@@ -102,18 +103,20 @@ HTML_TEMPLATE = '''
             color: #721c24;
             border: 1px solid #f5c6cb;
         }
-        .download-link {
-            display: inline-block;
-            margin-top: 10px;
-            padding: 10px 20px;
-            background-color: #28a745;
+        .download-btn {
+            width: 100%;
+            padding: 15px;
+            background: #28a745;
             color: white;
-            text-decoration: none;
-            border-radius: 6px;
-            font-weight: 500;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            margin-top: 20px;
         }
-        .download-link:hover {
-            background-color: #218838;
+        .download-btn:hover {
+            background: #218838;
         }
         .loading {
             display: none;
@@ -133,21 +136,31 @@ HTML_TEMPLATE = '''
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+        textarea {
+            width: 100%;
+            height: 300px;
+            margin-top: 20px;
+            font-family: monospace;
+            font-size: 12px;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+            padding: 10px;
+            background: #f9f9f9;
+            resize: vertical;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Context for your Code</h1>
         
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                {% for category, message in messages %}
-                    <div class="alert alert-{{ category }}">
-                        {{ message|safe }}
-                    </div>
-                {% endfor %}
-            {% endif %}
-        {% endwith %}
+        {% if error %}
+            <div class="alert alert-error">{{ error }}</div>
+        {% endif %}
+        
+        {% if success %}
+            <div class="alert alert-success">{{ success }}</div>
+        {% endif %}
         
         <form method="POST" onsubmit="showLoading()">
             <div class="input-group">
@@ -161,6 +174,15 @@ HTML_TEMPLATE = '''
             </div>
             <button type="submit">🚀 Generate Context</button>
         </form>
+        
+        {% if context_text %}
+            <textarea readonly>{{ context_text }}</textarea>
+            <form method="POST" action="/download">
+                <input type="hidden" name="context_data" value="{{ context_text }}">
+                <input type="hidden" name="filename" value="{{ filename }}">
+                <button type="submit" class="download-btn">📥 Download Context File</button>
+            </form>
+        {% endif %}
         
         <div class="loading" id="loading">
             <div class="spinner"></div>
@@ -204,40 +226,29 @@ def get_file_content_from_api(user, repo, file_path, branch='main'):
     return None
 
 def should_include_file(file_path):
-    """Smart filtering - include ALL relevant files but exclude junk"""
-    
-    # Skip these directories completely
+    blacklisted_files = {
+        'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'composer.lock',
+        'Pipfile.lock', 'poetry.lock', 'go.sum', 'Cargo.lock'
+    }
     skip_dirs = [
-        '.git/', 'node_modules/', '__pycache__/', '.pytest_cache/', 
-        'venv/', 'env/', '.venv/', '.env/', 'dist/', 'build/', 
-        '.next/', '.nuxt/', 'vendor/', 'target/', 'bin/', 'obj/',
-        '.idea/', '.vscode/', '.DS_Store'
+        '.git/', 'node_modules/', '__pycache__/', 'venv/', 'env/', 
+        'dist/', 'build/', '.next/', '.nuxt/', 'vendor/', 'target/'
     ]
+    skip_extensions = {
+        '.pyc', '.jpg', '.png', '.gif', '.zip', '.tar', '.gz', 
+        '.log', '.tmp', '.cache', '.map', '.min.js', '.min.css'
+    }
     
-    # Skip these file types
-    skip_extensions = [
-        '.pyc', '.pyo', '.pyd', '.so', '.dll', '.exe', '.bin', '.obj',
-        '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.ico', '.svg', '.webp',
-        '.mp4', '.mp3', '.wav', '.avi', '.mov', '.wmv', '.flv',
-        '.zip', '.tar', '.gz', '.rar', '.7z', '.bz2',
-        '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-        '.lock', '.log', '.tmp', '.temp', '.cache'
-    ]
-    
-    # Check directory exclusions
+    filename = file_path.split('/')[-1]
+    if filename in blacklisted_files:
+        return False
     if any(skip_dir in file_path for skip_dir in skip_dirs):
         return False
-    
-    # Check file extension exclusions
     if any(file_path.lower().endswith(ext) for ext in skip_extensions):
         return False
-    
     return True
 
-def get_all_repo_files(user, repo):
-    """Get ALL relevant files from repository - comprehensive approach"""
-    
-    # Get repo info
+def get_clean_repo_context(user, repo):
     repo_info = get_repo_info(user, repo)
     if not repo_info:
         return None, "Repository not found or private"
@@ -247,7 +258,6 @@ def get_all_repo_files(user, repo):
     description = repo_info.get('description', 'No description available')
     language = repo_info.get('language', 'Unknown')
     
-    # Get complete file tree
     api_url = f"https://api.github.com/repos/{user}/{repo}/git/trees/{branch}?recursive=1"
     response = requests.get(api_url)
     if response.status_code != 200:
@@ -255,148 +265,145 @@ def get_all_repo_files(user, repo):
     
     tree = response.json().get('tree', [])
     
-    # Categorize ALL files
-    documentation_files = []
-    config_files = []
+    readme_files = []
+    important_config_files = []
     source_files = []
+    
+    useful_configs = {
+        'package.json', 'tsconfig.json', 'vite.config.js', 'vite.config.ts',
+        'tailwind.config.js', 'requirements.txt', 'pyproject.toml', 
+        'Cargo.toml', 'go.mod', 'Makefile', 'Dockerfile'
+    }
     
     for item in tree:
         if item['type'] == 'blob' and should_include_file(item['path']):
             file_path = item['path']
             filename = file_path.split('/')[-1].lower()
             
-            # Documentation files
-            if any(doc in filename for doc in ['readme', 'changelog', 'license', 'contributing', 'authors', 'todo']):
-                documentation_files.append(file_path)
-            
-            # Configuration files
-            elif any(filename.endswith(ext) for ext in ['.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.env.example']):
-                config_files.append(file_path)
-            
-            # Source files - ALL OF THEM
+            if any(doc in filename for doc in ['readme', 'changelog', 'license']):
+                readme_files.append(file_path)
+            elif file_path.split('/')[-1] in useful_configs:
+                important_config_files.append(file_path)
             elif any(filename.endswith(ext) for ext in [
-                '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', '.hpp',
-                '.cs', '.rb', '.go', '.rs', '.php', '.swift', '.kt', '.scala', '.r',
-                '.sql', '.sh', '.bat', '.ps1', '.html', '.css', '.scss', '.sass',
-                '.vue', '.svelte', '.dart', '.lua', '.perl', '.clj', '.elm', '.haskell',
-                '.ml', '.fs', '.vb', '.asm', '.dockerfile', '.makefile', '.gradle',
-                '.xml', '.xsl', '.xsd'
+                '.py', '.js', '.ts', '.jsx', '.tsx', '.vue', '.html', '.css', 
+                '.java', '.cpp', '.c', '.go', '.rs', '.php', '.rb'
             ]):
                 source_files.append(file_path)
     
-    # Build comprehensive context
     context_sections = []
-    context_sections.append("=" * 100)
-    context_sections.append(f"COMPLETE PROJECT CONTEXT: {repo_name}")
-    context_sections.append("=" * 100)
-    context_sections.append(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    context_sections.append("=" * 80)
+    context_sections.append(f"🚀 CLEAN PROJECT CONTEXT: {repo_name}")
+    context_sections.append("=" * 80)
+    context_sections.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     context_sections.append(f"Repository: https://github.com/{user}/{repo}")
-    context_sections.append(f"Primary Language: {language}")
+    context_sections.append(f"Language: {language}")
     context_sections.append(f"Description: {description}")
-    context_sections.append(f"Total Files Processed: {len(documentation_files + config_files + source_files)}")
     context_sections.append("")
     
-    # DOCUMENTATION SECTION
-    if documentation_files:
-        context_sections.append("## 📚 DOCUMENTATION FILES")
+    # README & DOCUMENTATION
+    if readme_files:
+        context_sections.append("## 📚 PROJECT DOCUMENTATION")
         context_sections.append("=" * 50)
-        for file_path in documentation_files:
+        for file_path in readme_files[:3]:  # Limit to 3 files
             content = get_file_content_from_api(user, repo, file_path, branch)
             if content:
                 context_sections.append(f"\n--- {file_path} ---")
-                context_sections.append(content)
+                context_sections.append(content[:5000])
+                if len(content) > 5000:
+                    context_sections.append("\n... (truncated)")
                 context_sections.append("")
     
-    # CONFIGURATION SECTION
-    if config_files:
-        context_sections.append("## ⚙️ CONFIGURATION FILES")
+    # CONFIGURATION
+    if important_config_files:
+        context_sections.append("## ⚙️ PROJECT CONFIGURATION")
         context_sections.append("=" * 50)
-        for file_path in config_files:
+        for file_path in important_config_files[:5]:  # Limit to 5 files
             content = get_file_content_from_api(user, repo, file_path, branch)
             if content:
                 context_sections.append(f"\n--- {file_path} ---")
-                context_sections.append(content)
+                context_sections.append(content[:2000])
+                if len(content) > 2000:
+                    context_sections.append("\n... (truncated)")
                 context_sections.append("")
     
-    # SOURCE CODE SECTION - ALL FILES
+    # SOURCE CODE
     if source_files:
-        context_sections.append("## 💻 SOURCE CODE FILES")
+        context_sections.append("## 💻 SOURCE CODE")
         context_sections.append("=" * 50)
         
-        # Group by file type for better organization
-        files_by_extension = {}
+        files_by_type = {}
         for file_path in source_files:
             ext = '.' + file_path.split('.')[-1] if '.' in file_path else 'no_ext'
-            files_by_extension.setdefault(ext, []).append(file_path)
+            files_by_type.setdefault(ext, []).append(file_path)
         
-        for ext, files in sorted(files_by_extension.items()):
-            context_sections.append(f"\n### {ext.upper()} FILES")
-            context_sections.append("-" * 30)
-            
-            for file_path in files:
-                content = get_file_content_from_api(user, repo, file_path, branch)
-                if content:
-                    context_sections.append(f"\n--- {file_path} ---")
-                    # Limit very large files
-                    if len(content) > 10000:
-                        context_sections.append(content[:10000] + "\n... (truncated - file too large)")
-                    else:
-                        context_sections.append(content)
-                    context_sections.append("")
+        for ext, files in sorted(files_by_type.items()):
+            if files:
+                context_sections.append(f"\n### {ext.upper()} FILES")
+                context_sections.append("-" * 30)
+                
+                for file_path in files[:8]:  # Max 8 files per type
+                    content = get_file_content_from_api(user, repo, file_path, branch)
+                    if content:
+                        context_sections.append(f"\n--- {file_path} ---")
+                        if len(content) > 3000:
+                            context_sections.append(content[:3000] + "\n... (truncated)")
+                        else:
+                            context_sections.append(content)
+                        context_sections.append("")
     
-    context_sections.append("=" * 100)
-    context_sections.append("END OF COMPLETE CONTEXT")
-    context_sections.append("=" * 100)
+    context_sections.append("=" * 80)
+    context_sections.append("🎯 END OF CLEAN CONTEXT")
+    context_sections.append("=" * 80)
     
     return '\n'.join(context_sections), None
 
 @app.route('/', methods=['GET', 'POST'])
 def home():
-    github_link = ''
     if request.method == 'POST':
         github_link = request.form.get('github_link', '').strip()
         
         user, repo = validate_github_url(github_link)
         if not user or not repo:
-            flash('Please enter a valid GitHub repository URL', 'error')
-            return render_template_string(HTML_TEMPLATE, github_link=github_link)
+            return render_template_string(HTML_TEMPLATE, 
+                                        error='Please enter a valid GitHub repository URL',
+                                        github_link=github_link)
         
         try:
-            context_text, error = get_all_repo_files(user, repo)
+            context_text, error = get_clean_repo_context(user, repo)
             
             if error:
-                flash(f'Error: {error}', 'error')
-                return render_template_string(HTML_TEMPLATE, github_link=github_link)
+                return render_template_string(HTML_TEMPLATE, 
+                                            error=f'Error: {error}',
+                                            github_link=github_link)
             
-            # Save context to file
-            os.makedirs('outputs', exist_ok=True)
-            output_filename = f'{repo}_complete_context.txt'
-            output_path = os.path.join('outputs', output_filename)
-            
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(context_text)
-            
-            flash(Markup(f'Complete context generated! <a href="/download/{output_filename}" class="download-link">Download {output_filename}</a>'), 'success')
+            filename = f'{repo}_clean_context.txt'
+            return render_template_string(HTML_TEMPLATE,
+                                        success='Context generated successfully!',
+                                        context_text=context_text,
+                                        filename=filename,
+                                        github_link=github_link)
             
         except Exception as e:
-            flash(f'Error generating context: {str(e)}', 'error')
-        
-        return render_template_string(HTML_TEMPLATE, github_link=github_link)
+            return render_template_string(HTML_TEMPLATE,
+                                        error=f'Error generating context: {str(e)}',
+                                        github_link=github_link)
     
     return render_template_string(HTML_TEMPLATE)
 
-@app.route('/download/<filename>')
-def download_file(filename):
-    try:
-        file_path = os.path.join('outputs', filename)
-        return send_file(file_path, as_attachment=True)
-    except Exception as e:
-        flash(f'Error downloading file: {str(e)}', 'error')
-        return redirect(url_for('home'))
+@app.route('/download', methods=['POST'])
+def download_file():
+    context_data = request.form.get('context_data', '')
+    filename = request.form.get('filename', 'context.txt')
+    
+    if not context_data:
+        return render_template_string(HTML_TEMPLATE, error='No context data found')
+    
+    return Response(
+        context_data,
+        mimetype='text/plain',
+        headers={'Content-Disposition': f'attachment; filename={filename}'}
+    )
 
+# Vercel entry point
 if __name__ == '__main__':
-    os.makedirs('outputs', exist_ok=True)
-    print("🚀 Starting Complete Context Extractor...")
-    print("📝 Open your browser and go to: http://localhost:5000")
-    print("⚡ Ready to extract COMPLETE project contexts!")
-    app.run(debug=True, port=5000)
+    app.run(debug=True)
